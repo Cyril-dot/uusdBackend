@@ -58,8 +58,8 @@ public class PaystackService {
 
         Map<String, Object> body = new HashMap<>();
         // Paystack requires an email on every charge; customers dialing USSD rarely have one on file,
-        // so we synthesize a stable, harmless placeholder tied to their number.
-        body.put("email", payerLocalMsisdn + "@ussd.customer");
+        // so we use a fixed merchant-owned mailbox as the placeholder for all USSD charges.
+        body.put("email", "cheapestdata600@gmail.com");
         body.put("amount", Math.round(amountGhs * 100)); // GHS charged in pesewas (subunit)
         body.put("currency", "GHS");
         body.put("reference", reference);
