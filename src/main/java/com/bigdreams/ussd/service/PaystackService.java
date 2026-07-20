@@ -74,13 +74,19 @@ public class PaystackService {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(properties.getSecretKey());
 
+        log.info("Initiating Paystack charge reference={} network={} provider={} amountGhs={}",
+                reference, network, provider, amountGhs);
+
         try {
             ResponseEntity<Map> response = restTemplate.postForEntity(
                     properties.getBaseUrl() + "/charge",
                     new HttpEntity<>(body, headers),
                     Map.class
             );
-            return extractResult(response);
+            ChargeResult result = extractResult(response);
+            log.info("Paystack charge response reference={} initiated={} status={}",
+                    reference, result.initiated(), result.status());
+            return result;
         } catch (RestClientException ex) {
             log.error("Paystack charge call failed for reference={}", reference, ex);
             return new ChargeResult(false, null, "Could not reach the payment provider. Please try again.");
@@ -102,13 +108,18 @@ public class PaystackService {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(properties.getSecretKey());
 
+        log.info("Submitting OTP for Paystack charge reference={}", reference);
+
         try {
             ResponseEntity<Map> response = restTemplate.postForEntity(
                     properties.getBaseUrl() + "/charge/submit_otp",
                     new HttpEntity<>(body, headers),
                     Map.class
             );
-            return extractResult(response);
+            ChargeResult result = extractResult(response);
+            log.info("Paystack submit_otp response reference={} initiated={} status={}",
+                    reference, result.initiated(), result.status());
+            return result;
         } catch (RestClientException ex) {
             log.error("Paystack submit_otp call failed for reference={}", reference, ex);
             return new ChargeResult(false, null, "Could not reach the payment provider. Please try again.");

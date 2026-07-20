@@ -53,11 +53,13 @@ public class UssdFlowService {
         SessionState session = req.isNewSession() ? null : sessionService.get(req.sessionID());
 
         if (session == null) {
-            session = sessionService.create(req.sessionID(), req.msisdn());
+            log.info("New USSD session {} started for {}", req.sessionID(), PhoneUtil.toLocal(req.msisdn()));
+            sessionService.create(req.sessionID(), req.msisdn());
             return renderMainMenu(req, null);
         }
 
         String input = req.userDataTrimmed();
+        log.debug("Session {} at step {} received input '{}'", session.getSessionId(), session.getStep(), input);
 
         return switch (session.getStep()) {
             case MAIN_MENU -> handleMainMenu(req, session, input);
@@ -86,15 +88,19 @@ public class UssdFlowService {
     private UssdResponse handleMainMenu(UssdRequest req, SessionState session, String input) {
         String network = NETWORK_BY_KEY.get(input);
         if (network == null) {
+            log.debug("Session {} entered invalid network option '{}'", session.getSessionId(), input);
             return renderMainMenu(req, "Invalid option.");
         }
 
         List<Bundle> bundles = bundleCatalogService.getBundles(network);
         if (bundles.isEmpty()) {
+            log.warn("No bundles available for network {} (session {})", network, session.getSessionId());
             sessionService.remove(session.getSessionId());
             return UssdResponse.end(req, "No bundles are available for "
                     + NETWORK_DISPLAY.get(network) + " right now. Please try again later.");
         }
+
+        log.info("Session {} selected network {}", session.getSessionId(), network);
 
         session.setNetwork(network);
         session.setBundles(bundles);
@@ -152,6 +158,7 @@ public class UssdFlowService {
                 session.setBundlePage(page - 1);
                 return renderBundleMenu(req, session, null);
             }
+            log.debug("Session {} backed out of bundle selection to main menu", session.getSessionId());
             session.setStep(UssdStep.MAIN_MENU);
             session.setBundlePage(0);
             return renderMainMenu(req, null);
@@ -165,10 +172,14 @@ public class UssdFlowService {
         }
 
         if (choice < 1 || choice > pageCount) {
+            log.debug("Session {} entered invalid bundle option '{}'", session.getSessionId(), input);
             return renderBundleMenu(req, session, "Invalid option.");
         }
 
-        session.setSelectedBundle(all.get(start + choice - 1));
+        Bundle selected = all.get(start + choice - 1);
+        log.info("Session {} selected bundle {} ({})", session.getSessionId(), selected.size(), session.getNetwork());
+
+        session.setSelectedBundle(selected);
         session.setStep(UssdStep.SELECT_RECIPIENT_TYPE);
         return renderRecipientTypeMenu(req, session, null);
     }
@@ -194,12 +205,14 @@ public class UssdFlowService {
                 return renderBundleMenu(req, session, null);
             case "1":
                 session.setRecipient(PhoneUtil.toLocal(session.getMsisdn()));
+                log.debug("Session {} sending bundle to own number", session.getSessionId());
                 session.setStep(UssdStep.CONFIRM);
                 return renderConfirm(req, session, null);
             case "2":
                 session.setStep(UssdStep.ENTER_RECIPIENT);
                 return UssdResponse.continueWith(req, "Enter recipient number\n(e.g. 0244123456)");
             default:
+                log.debug("Session {} entered invalid recipient type option '{}'", session.getSessionId(), input);
                 return renderRecipientTypeMenu(req, session, "Invalid option.");
         }
     }
@@ -209,9 +222,11 @@ public class UssdFlowService {
     private UssdResponse handleEnterRecipient(UssdRequest req, SessionState session, String input) {
         String candidate = input.replaceAll("[^0-9]", "");
         if (!PhoneUtil.isValidLocal(candidate)) {
+            log.debug("Session {} entered invalid recipient number", session.getSessionId());
             return UssdResponse.continueWith(req,
                     "Invalid number. Enter a 10-digit number starting with 0\n(e.g. 0244123456)");
         }
+        log.debug("Session {} entered recipient number for delivery", session.getSessionId());
         session.setRecipient(candidate);
         session.setStep(UssdStep.CONFIRM);
         return renderConfirm(req, session, null);
@@ -240,9 +255,11 @@ public class UssdFlowService {
             case "1":
                 return initiatePaymentAndEnd(req, session);
             case "2":
+                log.info("Session {} cancelled order at confirmation step", session.getSessionId());
                 sessionService.remove(session.getSessionId());
                 return UssdResponse.end(req, "Order cancelled. Thank you for using our service.");
             default:
+                log.debug("Session {} entered invalid confirm option '{}'", session.getSessionId(), input);
                 return renderConfirm(req, session, "Invalid option.");
         }
     }
@@ -268,6 +285,9 @@ public class UssdFlowService {
         // the same USSD session doesn't collide with a still-pending prior charge.
         String reference = "USSD_" + session.getSessionId() + "_" + System.currentTimeMillis();
 
+        log.info("Session {} initiating charge {} for {} ({}) on {}",
+                session.getSessionId(), reference, bundle.size(), bundle.price(), session.getNetwork());
+
         pendingOrderStore.put(new PendingOrder(
                 reference,
                 payer,
@@ -290,6 +310,8 @@ public class UssdFlowService {
         // First-time (or otherwise flagged) MoMo numbers: Paystack pauses the
         // charge and asks for an SMS OTP before it will send the PIN prompt.
         if ("send_otp".equalsIgnoreCase(charge.status())) {
+            log.info("Charge {} requires OTP verification, routing session {} to ENTER_OTP",
+                    reference, session.getSessionId());
             session.setPendingReference(reference);
             session.setStep(UssdStep.ENTER_OTP);
             return UssdResponse.continueWith(req,
@@ -297,6 +319,8 @@ public class UssdFlowService {
         }
 
         // Already at pay_offline / success - PIN prompt is on its way, nothing more to collect here.
+        log.info("Charge {} initiated with status {}, ending session {}",
+                reference, charge.status(), session.getSessionId());
         sessionService.remove(session.getSessionId());
         return UssdResponse.end(req,
                 "Approve the GHS" + String.format("%.2f", bundle.price())
@@ -309,11 +333,14 @@ public class UssdFlowService {
     private UssdResponse handleEnterOtp(UssdRequest req, SessionState session, String input) {
         String otp = input.replaceAll("[^0-9]", "");
         if (otp.isEmpty()) {
+            log.debug("Session {} submitted empty/invalid OTP input", session.getSessionId());
             return UssdResponse.continueWith(req, "Invalid code. Enter the code sent to your phone via SMS.");
         }
 
         Bundle bundle = session.getSelectedBundle();
         String reference = session.getPendingReference();
+
+        log.info("Session {} submitting OTP for charge {}", session.getSessionId(), reference);
 
         ChargeResult result = paystackService.submitOtp(otp, reference);
         sessionService.remove(session.getSessionId());
@@ -324,6 +351,7 @@ public class UssdFlowService {
             return UssdResponse.end(req, "That code didn't work. Please dial in again to retry your purchase.");
         }
 
+        log.info("OTP accepted for charge {}, awaiting MoMo PIN approval", reference);
         return UssdResponse.end(req,
                 "Approve the GHS" + String.format("%.2f", bundle.price())
                         + " payment prompt sent to your phone to complete your " + bundle.size() + " purchase.\n"

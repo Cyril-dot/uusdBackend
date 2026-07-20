@@ -32,6 +32,7 @@ public class UssdSessionService {
     public SessionState create(String sessionId, String msisdn) {
         SessionState state = new SessionState(sessionId, msisdn);
         sessions.put(sessionId, state);
+        log.debug("Created session {} (active sessions: {})", sessionId, sessions.size());
         return state;
     }
 
@@ -39,12 +40,17 @@ public class UssdSessionService {
         SessionState state = sessions.get(sessionId);
         if (state != null) {
             state.touch();
+        } else {
+            log.debug("Session {} not found (expired or invalid)", sessionId);
         }
         return state;
     }
 
     public void remove(String sessionId) {
-        sessions.remove(sessionId);
+        SessionState removed = sessions.remove(sessionId);
+        if (removed != null) {
+            log.debug("Removed session {} (active sessions: {})", sessionId, sessions.size());
+        }
     }
 
     @Scheduled(fixedRate = 60_000)
@@ -54,7 +60,7 @@ public class UssdSessionService {
         sessions.entrySet().removeIf(e -> e.getValue().getLastActivity() < cutoff);
         int removed = before - sessions.size();
         if (removed > 0) {
-            log.debug("Cleaned up {} expired USSD session(s)", removed);
+            log.debug("Cleaned up {} expired USSD session(s), {} remaining", removed, sessions.size());
         }
     }
 }
