@@ -40,9 +40,9 @@ public class UssdFlowService {
     private final PendingOrderStore pendingOrderStore;
 
     public UssdFlowService(UssdSessionService sessionService,
-                            BundleCatalogService bundleCatalogService,
-                            PaystackService paystackService,
-                            PendingOrderStore pendingOrderStore) {
+                           BundleCatalogService bundleCatalogService,
+                           PaystackService paystackService,
+                           PendingOrderStore pendingOrderStore) {
         this.sessionService = sessionService;
         this.bundleCatalogService = bundleCatalogService;
         this.paystackService = paystackService;
@@ -65,6 +65,7 @@ public class UssdFlowService {
             case SELECT_RECIPIENT_TYPE -> handleSelectRecipientType(req, session, input);
             case ENTER_RECIPIENT -> handleEnterRecipient(req, session, input);
             case CONFIRM -> handleConfirm(req, session, input);
+            case ENTER_OTP -> handleEnterOtp(req, session, input);
         };
     }
 
@@ -252,6 +253,12 @@ public class UssdFlowService {
     // in PaystackWebhookController, once Paystack confirms the charge succeeded.
     // This is because the customer has to approve a MoMo PIN prompt on their
     // phone, which almost always outlives the USSD session window.
+    //
+    // Some MoMo numbers (commonly first-time payers) require an extra step:
+    // Paystack pauses the charge, texts the customer an OTP, and returns
+    // status "send_otp" instead of going straight to the PIN prompt. In that
+    // case we route to ENTER_OTP and only send the PIN prompt after the OTP
+    // is submitted successfully.
 
     private UssdResponse initiatePaymentAndEnd(UssdRequest req, SessionState session) {
         Bundle bundle = session.getSelectedBundle();
@@ -273,12 +280,48 @@ public class UssdFlowService {
 
         ChargeResult charge = paystackService.chargeMobileMoney(session.getNetwork(), payer, bundle.price(), reference);
 
-        sessionService.remove(session.getSessionId());
-
         if (!charge.initiated()) {
             pendingOrderStore.remove(reference);
+            sessionService.remove(session.getSessionId());
             log.warn("Failed to initiate Paystack charge for reference {}: {}", reference, charge.message());
             return UssdResponse.end(req, "We could not start your payment. Please try again shortly.");
+        }
+
+        // First-time (or otherwise flagged) MoMo numbers: Paystack pauses the
+        // charge and asks for an SMS OTP before it will send the PIN prompt.
+        if ("send_otp".equalsIgnoreCase(charge.status())) {
+            session.setPendingReference(reference);
+            session.setStep(UssdStep.ENTER_OTP);
+            return UssdResponse.continueWith(req,
+                    "Enter the code sent to your phone via SMS to continue.");
+        }
+
+        // Already at pay_offline / success - PIN prompt is on its way, nothing more to collect here.
+        sessionService.remove(session.getSessionId());
+        return UssdResponse.end(req,
+                "Approve the GHS" + String.format("%.2f", bundle.price())
+                        + " payment prompt sent to your phone to complete your " + bundle.size() + " purchase.\n"
+                        + "You'll get an SMS once it's confirmed.");
+    }
+
+    // ---------- Step 7: OTP entry (first-time MoMo numbers only) ----------
+
+    private UssdResponse handleEnterOtp(UssdRequest req, SessionState session, String input) {
+        String otp = input.replaceAll("[^0-9]", "");
+        if (otp.isEmpty()) {
+            return UssdResponse.continueWith(req, "Invalid code. Enter the code sent to your phone via SMS.");
+        }
+
+        Bundle bundle = session.getSelectedBundle();
+        String reference = session.getPendingReference();
+
+        ChargeResult result = paystackService.submitOtp(otp, reference);
+        sessionService.remove(session.getSessionId());
+
+        if (!result.initiated()) {
+            pendingOrderStore.remove(reference);
+            log.warn("OTP submission failed for reference {}: {}", reference, result.message());
+            return UssdResponse.end(req, "That code didn't work. Please dial in again to retry your purchase.");
         }
 
         return UssdResponse.end(req,

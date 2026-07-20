@@ -15,6 +15,7 @@ public class SessionState {
     private int bundlePage = 0;
     private Bundle selectedBundle;
     private String recipient;
+    private String pendingReference; // Paystack charge reference while awaiting OTP
 
     private volatile long lastActivity = System.currentTimeMillis();
 
@@ -81,6 +82,14 @@ public class SessionState {
 
     public void setRecipient(String recipient) {
         this.recipient = recipient;
+    }
+
+    public String getPendingReference() {
+        return pendingReference;
+    }
+
+    public void setPendingReference(String pendingReference) {
+        this.pendingReference = pendingReference;
     }
 
     public long getLastActivity() {

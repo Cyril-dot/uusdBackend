@@ -5,5 +5,6 @@ public enum UssdStep {
     SELECT_BUNDLE,
     SELECT_RECIPIENT_TYPE,
     ENTER_RECIPIENT,
-    CONFIRM
+    CONFIRM,
+    ENTER_OTP
 }

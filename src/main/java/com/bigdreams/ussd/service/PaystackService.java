@@ -47,6 +47,11 @@ public class PaystackService {
      * entry) to the payer's phone; the outcome arrives later via the
      * charge.success / charge.failed webhook - this call only tells you the
      * charge was *accepted for processing*, not that money has moved yet.
+     *
+     * For some MoMo numbers (commonly first-time payers) Paystack won't send
+     * the PIN prompt immediately - it first pauses the charge and returns
+     * data.status = "send_otp", meaning an SMS code was sent to the customer
+     * and must be submitted via submitOtp() before the PIN prompt goes out.
      */
     @SuppressWarnings("unchecked")
     public ChargeResult chargeMobileMoney(String network, String payerLocalMsisdn, double amountGhs, String reference) {
@@ -75,18 +80,51 @@ public class PaystackService {
                     new HttpEntity<>(body, headers),
                     Map.class
             );
-            Map<String, Object> respBody = response.getBody();
-            boolean ok = respBody != null && Boolean.TRUE.equals(respBody.get("status"));
-            String message = respBody != null && respBody.get("message") != null ? respBody.get("message").toString() : null;
-            String dataStatus = null;
-            if (respBody != null && respBody.get("data") instanceof Map<?, ?> data) {
-                Object s = data.get("status");
-                dataStatus = s == null ? null : s.toString();
-            }
-            return new ChargeResult(ok, dataStatus, message);
+            return extractResult(response);
         } catch (RestClientException ex) {
             log.error("Paystack charge call failed for reference={}", reference, ex);
             return new ChargeResult(false, null, "Could not reach the payment provider. Please try again.");
         }
+    }
+
+    /**
+     * Submits the OTP code the customer received by SMS, to unlock a charge
+     * that came back with status "send_otp". On success, Paystack proceeds
+     * to send the MoMo PIN approval prompt to the customer's phone.
+     */
+    @SuppressWarnings("unchecked")
+    public ChargeResult submitOtp(String otp, String reference) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("otp", otp);
+        body.put("reference", reference);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(properties.getSecretKey());
+
+        try {
+            ResponseEntity<Map> response = restTemplate.postForEntity(
+                    properties.getBaseUrl() + "/charge/submit_otp",
+                    new HttpEntity<>(body, headers),
+                    Map.class
+            );
+            return extractResult(response);
+        } catch (RestClientException ex) {
+            log.error("Paystack submit_otp call failed for reference={}", reference, ex);
+            return new ChargeResult(false, null, "Could not reach the payment provider. Please try again.");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private ChargeResult extractResult(ResponseEntity<Map> response) {
+        Map<String, Object> respBody = response.getBody();
+        boolean ok = respBody != null && Boolean.TRUE.equals(respBody.get("status"));
+        String message = respBody != null && respBody.get("message") != null ? respBody.get("message").toString() : null;
+        String dataStatus = null;
+        if (respBody != null && respBody.get("data") instanceof Map<?, ?> data) {
+            Object s = data.get("status");
+            dataStatus = s == null ? null : s.toString();
+        }
+        return new ChargeResult(ok, dataStatus, message);
     }
 }
